@@ -1,0 +1,153 @@
+# ---- 0. clean environment ----
+rm(list = ls())
+gc()
+
+# ---- 1. load packages ----
+library(data.table)
+library(Seurat)
+library(Matrix)
+
+# 1. 正确读取 CSV （你的文件是逗号分隔）
+expr_raw <- fread(
+   "ABC_umi_matrix_7551_cells.csv",
+   sep = ",",
+   header = TRUE,
+   data.table = FALSE,
+   check.names = FALSE
+)
+
+# 2. 添加人工 cell_id，因文件本身缺失
+cell_ids <- paste0("Cell_", seq_len(nrow(expr_raw)))
+rownames(expr_raw) <- cell_ids
+
+# 3. 转为 gene × cell
+expr_mat <- t(as.matrix(expr_raw))
+
+# 4. 修复基因名（防止重复）
+rownames(expr_mat) <- make.unique(rownames(expr_mat))
+
+# 5. 转稀疏矩阵
+expr_raw[] <- lapply(expr_raw, function(x) as.numeric(as.character(x)))
+
+######################################
+# 3. 人工添加 cell_id（因为你的文件没有）
+######################################
+cell_ids <- paste0("Cell_", seq_len(nrow(expr_raw)))
+rownames(expr_raw) <- cell_ids
+
+######################################
+# 4. 转 gene × cell（Seurat要求基因是行）
+######################################
+expr_mat <- t(as.matrix(expr_raw))
+
+######################################
+# 5. 修复基因名
+######################################
+rownames(expr_mat) <- make.unique(rownames(expr_mat))
+
+######################################
+# 6. 转为稀疏矩阵（现在不会再报错）
+######################################
+expr_mat <- as(expr_mat, "dgCMatrix")
+
+# 6. 创建 Seurat 对象（保证不报错）
+seu.obj <- CreateSeuratObject(counts = expr_mat)
+
+seu.obj
+
+# ---- 7. create Seurat object ----老错
+# 提取 counts 矩阵（Seurat v5 会有 layer 概念）
+mat_counts <- GetAssayData(seu.obj, layer = "counts")
+
+# 计算每个基因的方差
+gene_var <- apply(mat_counts, 1, var)
+
+# 保留方差 > 0 且非 NA 的基因
+keep_genes <- names(gene_var)[!is.na(gene_var) & gene_var > 0]
+
+length(keep_genes)  # 看看剩多少基因
+
+# 用这些基因重新 subset 一下 Seurat 对象
+seu.obj <- subset(seu.obj, features = keep_genes)
+#####以上对的
+     # 1）先用 dispersion，基本不会再触发 NA 问题
+seu.obj <- FindVariableFeatures(
+   seu.obj,
+   selection.method = "dispersion",
+   nfeatures = 2000
+)
+# 看一下选出的高变基因数目
+length(VariableFeatures(seu.obj))
+head(VariableFeatures(seu.obj))
+          #####以上对的
+# 1）取归一化后的表达矩阵（data slot）
+data_mat <- GetAssayData(seu.obj, slot = "data")  # 如果报错再改成 layer = "data"
+
+# 2）计算每个基因在归一化后的方差
+gene_var2 <- apply(data_mat, 1, var)
+
+# 3）选出方差>0且非NA的基因，作为 PCA 的特征
+use.genes <- names(gene_var2)[!is.na(gene_var2) & gene_var2 > 0]
+
+length(use.genes)  # 看看剩多少基因
+
+# 1）确保有 VariableFeatures（已经成功，2000 个）
+length(VariableFeatures(seu.obj))  # 应该是 2000
+#####这里以上都是对的￥￥￥￥￥￥￥￥￥￥￥￥￥￥￥￥
+library(irlba)
+
+# 1）取 counts 层
+mat_counts <- GetAssayData(seu.obj, layer = "counts")
+
+# 2）取高变基因（已经有 2000 个）
+var_genes <- VariableFeatures(seu.obj)
+
+# 3）用这些基因构建 细胞×基因 矩阵（注意转置）
+#    这里会转成普通 matrix，会占内存，但你维度不大（7550×2000），可以接受
+mat_pca <- t(as.matrix(mat_counts[var_genes, ]))
+
+dim(mat_pca)   # 应该是 7550 × 2000 左右
+#####以上都是对的&&&&&&&&&&&&&&&
+library(irlba)
+
+# 3）取高变基因
+var_genes <- VariableFeatures(seu.obj)
+
+# 3.5）重新构建带 dimnames 的细胞×基因矩阵（重要）
+mat_counts <- GetAssayData(seu.obj, layer = "counts")
+mat_pca <- t(as.matrix(mat_counts[var_genes, , drop = FALSE]))
+
+# 补齐 dimnames：行=细胞名，列=基因名
+rownames(mat_pca) <- colnames(seu.obj)
+colnames(mat_pca) <- var_genes
+
+# 4）PCA
+set.seed(1234)
+pca_res <- irlba::prcomp_irlba(
+   mat_pca,
+   n = 30,
+   center = TRUE,
+   scale. = TRUE
+)
+
+# 5）补齐 PCA 结果的 dimnames（保险起见再强制一遍）
+rownames(pca_res$x)        <- colnames(seu.obj)  # cells × PCs
+rownames(pca_res$rotation) <- var_genes          # genes × PCs
+
+# 6）嵌入 Seurat 对象
+seu.obj[["pca"]] <- CreateDimReducObject(
+   embeddings = pca_res$x,         # cells × PCs
+   loadings   = pca_res$rotation,  # genes × PCs
+   stdev      = pca_res$sdev,
+   key        = "PC_",
+   assay      = DefaultAssay(seu.obj)
+)
+
+# 7）后续照常
+ElbowPlot(seu.obj, reduction = "pca")
+
+seu.obj <- FindNeighbors(seu.obj, dims = 1:20, reduction = "pca")
+seu.obj <- FindClusters(seu.obj, resolution = 0.6)
+seu.obj <- RunUMAP(seu.obj, dims = 1:20, reduction = "pca")
+
+DimPlot(seu.obj, reduction = "umap")
