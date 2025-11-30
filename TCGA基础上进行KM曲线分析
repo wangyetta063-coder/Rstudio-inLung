@@ -1,0 +1,114 @@
+# script to run survival analysis using TCGA data
+#setwd("C:/Users/Administrator/Desktop/TCGAbiolinks")
+install.packages("survminer",
+                 dependencies = TRUE,
+                 repos = "https://cran.rstudio.com/")
+library(survminer)
+library(TCGAbiolinks)
+library(survminer)
+library(survival)
+library(SummarizedExperiment)
+library(tidyverse)
+library(DESeq2)
+###以上是准备阶段####
+# getting clinical data for TCGA-BRCA cohort -------------------
+clinical_brca <- GDCquery_clinic("TCGA-BRCA")
+any(colnames(clinical_brca) %in% c("vital_status", "days_to_last_follow_up", "days_to_death"))
+which(colnames(clinical_brca) %in% c("vital_status", "days_to_last_follow_up", "days_to_death"))#想要知道数据中是否存在对应的临床对象中对应的值
+clinical_brca[,c(10,46,54)]###这里显示的就是：[1] 10 46 54
+# looking at some variables associated with survival 
+table(clinical_brca$vital_status)
+# change certain values the way they are encoded
+clinical_brca$deceased <- ifelse(clinical_brca$vital_status == "Alive", FALSE, TRUE)
+# create an "overall survival" variable that is equal to days_to_death
+# for dead patients, and to days_to_last_follow_up for patients who
+# are still alive
+clinical_brca$overall_survival <- ifelse(clinical_brca$vital_status == "Alive",
+                                         clinical_brca$days_to_last_follow_up,#总体生存期反映的是最后一次随访天数
+                                         clinical_brca$days_to_death)
+
+# get gene expression data -----------
+
+###看哪一个P53表达低呢？在GDC下载后构建一个查询获取RNA定量数据（这里在NO.13中TCGA序列中运行过，不再赘述）
+# build a query to get gene expression data for entire cohort
+query_brca_all = GDCquery(
+   project = "TCGA-BRCA",
+   data.category = "Transcriptome Profiling", # parameter enforced by GDCquery
+   experimental.strategy = "RNA-Seq",
+   workflow.type = "STAR - Counts",
+   data.type = "Gene Expression Quantification",
+   sample.type = "Primary Tumor",
+   access = "open")
+
+output_brca <- getResults(query_brca_all)
+# get 20 primary tissue sample barcodes选择20个条形码，文件太多了没必要每个都下载，当然可以20、30、15都行
+tumor <- output_brca$cases[1:20]
+# OR
+tumor <- output_brca[output_brca$sample_type == "Primary Tumor", "cases"][1:20]
+tumor
+
+# # get gene expression data from 20 primary tumors 
+query_brca <- GDCquery(
+   project = "TCGA-BRCA",
+   data.category = "Transcriptome Profiling", # parameter enforced by GDCquery
+   experimental.strategy = "RNA-Seq",
+   workflow.type = "STAR - Counts",
+   data.type = "Gene Expression Quantification",
+   sample.type = c("Primary Tumor", "Solid Tissue Normal"),
+   access = "open",
+   barcode = tumor)
+# download data
+GDCdownload(query_brca)
+# get counts#展示前 10 行、前 10 列，完全不改变你的 20 个样本。
+tcga_brca_data <- GDCprepare(query_brca, summarizedExperiment = TRUE)
+brca_matrix <- assay(tcga_brca_data, "unstranded")
+brca_matrix[1:10,1:10]#可以改变，也可以不改
+####（如果怀疑可运行下面代码）
+     dim(brca_matrix)#[1] 60000   20（60000 = 基因数，20 = 你选取的 20 个临床条形码对应的表达矩阵列数，所以你的 20 个样本没有丢，也没有只取 10 个，R 只是为了打印方便展示 10×10。
+###是对的，继续######
+# extract gene and sample metadata from summarizedExperiment object
+gene_metadata <- as.data.frame(rowData(tcga_brca_data))
+coldata <- as.data.frame(colData(tcga_brca_data))
+# vst transform counts to be used in survival analysis ---------------
+# Setting up countData object  （进行方差稳定转化以及我们感兴趣的基因） 
+dds <- DESeqDataSetFromMatrix(countData = brca_matrix,#计数矩阵储存在这个brca_matrix
+                              colData = coldata,#列数据或样本信息储存在调用数据对象中
+                              design = ~ 1)#不指定任何设计，只对这个dds感兴趣
+# Removing genes with sum total of 10 reads across all samples移除地低表达基因之后进行变异稳定化转换
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+# vst ✨ 这是 DESeq2 提供的 变异稳定化变换 VST（Variance Stabilizing Transformation），VST 让所有基因的方差趋于稳定（更适合 PCA 和聚类）
+vsd <- vst(dds, blind=FALSE)
+brca_matrix_vst <- assay(vsd)
+brca_matrix_vst[1:10,1:10]
+######开始TP53##################
+# Get data for TP53 gene and add gene metadata information to it -------------
+brca_tp53 <- brca_matrix_vst %>% 
+   as.data.frame() %>% 
+   rownames_to_column(var = 'gene_id') %>% 
+   gather(key = 'case_id', value = 'counts', -gene_id) %>% 
+   left_join(., gene_metadata, by = "gene_id") %>% 
+   filter(gene_name == "TP53")
+
+
+# get median value（计算中位数，高得表示表达水平高于中位数）
+median_value <- median(brca_tp53$counts)
+
+# denote which cases have higher or lower expression than median count在strata组可以看到是高还是低
+brca_tp53$strata <- ifelse(brca_tp53$counts >= median_value, "HIGH", "LOW")
+
+# Add clinical information to brca_tp53
+brca_tp53$case_id <- gsub('-01.*', '', brca_tp53$case_id)
+brca_tp53 <- merge(brca_tp53, clinical_brca, by.x = 'case_id', by.y = 'submitter_id')
+
+
+# fitting survival curve -----------
+fit <- survfit(Surv(overall_survival, deceased) ~ strata, data = brca_tp53)
+fit
+ggsurvplot(fit,
+           data = brca_tp53,
+           pval = T,
+           risk.table = T)
+
+
+fit2 <- survdiff(Surv(overall_survival, deceased) ~ strata, data = brca_tp53)
