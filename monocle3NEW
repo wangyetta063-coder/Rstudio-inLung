@@ -1,0 +1,636 @@
+library(dplyr)
+library(tibble)
+install.packages("devtools")
+install.packages("Matrix")
+install.packages("Matrix.utils")
+# 1. 先装 remotes（如果已装会自动跳过/更新）
+install.packages("remotes")
+# 2. 加载 remotes
+library(remotes)
+# 3. 从 GitHub 安装 monocle3（不要加 ref 参数）
+remotes::install_github("cole-trapnell-lab/monocle3")
+
+BiocManager::install(c("BiocGenerics", "DelayedArray", "DelayedMatrixStats",
+                       "limma", "S4Vectors", "SingleCellExperiment"))
+
+install.packages("igraph", type = "binary")
+
+install.packages("devtools")
+install.packages("Matrix")
+install.packages("devtools")
+library(devtools)
+install_github("cole-trapnell-lab/monocle3", ref = "1.4.3")
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+BiocManager::install(version = "3.20")
+
+
+
+
+
+
+#开始
+library(monocle3)
+library(SeuratWrappers)
+library(Seurat)
+library(ggplot2)
+library(tidyverse)
+library(data.table)   # 加速读取大型文件
+library(Matrix)
+sessionInfo()#真实桌面路径
+setwd("C:/Users/Administrator/Desktop")
+getwd()
+set.seed(1234)
+
+#####准备开始&&&&&&&&&&&&&&&&先用R解
+# read in data
+markers <- read.delim('ABC_Marker.txt', header = T) # gene metadata
+metadata <- read.delim('ABC_Meta.txt', header = T) # cell metadata
+expr <- read.delim('ABC_umi_matrix_7551_cells.csv', header = T, sep = ',') # expression matrix
+library(Seurat)
+library(dplyr)
+
+# 1. expr 已经是你读入的矩阵
+expr.t <- t(expr)
+
+# 2. 创建一个全新的对象（避免之前被破坏的 seu.obj）
+seu.obj <- CreateSeuratObject(counts = expr.t)
+head(colnames(seu.obj))         # 细胞名
+head(rownames(seu.obj@meta.data))
+# 看一下 metadata 的结构
+head(metadata)
+# 确认有 cell_id 这一列
+
+# 按 Seurat 对象中的细胞顺序重排 metadata
+idx <- match(colnames(seu.obj), metadata$cell_id)
+metadata2 <- metadata[idx, ]
+
+# 检查是否完全对齐
+all(metadata2$cell_id == colnames(seu.obj))
+# 这一行必须是 TRUE
+rownames(metadata2) <- metadata2$cell_id
+metadata2$cell_id <- NULL
+
+seu.obj <- AddMetaData(seu.obj, metadata2)
+
+# 再确认一下
+head(seu.obj@meta.data)
+all(rownames(seu.obj@meta.data) == colnames(seu.obj))
+seu.obj$mitopercent <- PercentageFeatureSet(seu.obj, pattern = "^MT-")
+summary(seu.obj$mitopercent)
+head(rownames(seu.obj))
+grep("MT", rownames(seu.obj), value = TRUE)[1:20]
+
+sum(grepl("^MT-", rownames(seu.obj)))
+sum(grepl("^mt-", rownames(seu.obj)))
+sum(grepl("^Mt-", rownames(seu.obj)))
+sum(grepl("MT", rownames(seu.obj)))
+sum(grepl("mt", rownames(seu.obj)))
+
+#####都是0#########################
+# 线粒体比例：这里始终为 0，仅作为占位字段
+seu.obj$mitopercent <- PercentageFeatureSet(seu.obj, pattern = "^MT-")
+
+# 质控过滤（主要依赖 nCount_RNA / nFeature_RNA）
+seu.obj.filtered <- subset(
+  seu.obj,
+  subset = nCount_RNA   > 800 &
+    nFeature_RNA > 500
+  # & mitopercent < 10    # 保留也可以，但不影响结果
+)
+
+# 看看过滤前后细胞数变化
+c(原始 = ncol(seu.obj), 过滤后 = ncol(seu.obj.filtered))
+
+quantile(seu.obj@meta.data$nCount_RNA, probs = c(0, 0.05, 0.25, 0.5, 0.75, 0.95, 1))
+quantile(seu.obj@meta.data$nFeature_RNA, probs = c(0, 0.05, 0.25, 0.5, 0.75, 0.95, 1))
+seu.obj.filtered <- subset(
+  seu.obj,
+  subset = nCount_RNA   > 2000  &
+    nCount_RNA   < 200000 &
+    nFeature_RNA > 800   &
+    nFeature_RNA < 6000
+)
+
+c(原始 = ncol(seu.obj), 过滤后 = ncol(seu.obj.filtered))
+
+
+
+# create seurat object ---------------难受呀
+library(Seurat)
+library(dplyr)
+library(tibble)
+
+## 1. 创建 Seurat 对象 ------------------------------------------------
+expr.t <- t(expr)   # expr 是你读入的表达矩阵（行=基因，列=细胞）
+
+seu.obj <- CreateSeuratObject(counts = expr.t)
+
+# 确认细胞名和 meta.data 行名一致
+stopifnot(all(rownames(seu.obj@meta.data) == colnames(seu.obj)))
+
+
+## 2. 按细胞顺序正确添加 metadata -------------------------------------
+# 假设 metadata 里有一列是 cell_id，与 colnames(seu.obj) 对应
+# 如果名字不是 cell_id，请改成实际列名
+
+idx <- match(colnames(seu.obj), metadata$cell_id)
+metadata2 <- metadata[idx, ]
+
+# 检查是否一一对应（必须是 TRUE）
+stopifnot(all(metadata2$cell_id == colnames(seu.obj)))
+
+# 设定行名，去掉 cell_id 列
+rownames(metadata2) <- metadata2$cell_id
+metadata2$cell_id <- NULL
+
+# 安全添加到 Seurat 对象
+seu.obj <- AddMetaData(seu.obj, metadata2)
+
+# 再确认一次结构没坏
+stopifnot(all(rownames(seu.obj@meta.data) == colnames(seu.obj)))
+
+
+## 3. 线粒体比例（占位字段，按你的数据为 0 也没关系）---------------
+seu.obj$mitopercent <- PercentageFeatureSet(seu.obj, pattern = "^MT-")
+
+
+## 4. 质控过滤（用实际分布设阈值）-----------------------------------
+# 基于你前面算的分位数，给一套合理区间：
+# nCount_RNA   : 2000 ~ 200000
+# nFeature_RNA : 800  ~ 6000
+
+seu.obj.filtered <- subset(
+  seu.obj,
+  subset = nCount_RNA   > 2000  &
+    nCount_RNA   < 200000 &
+    nFeature_RNA > 800   &
+    nFeature_RNA < 6000
+)
+
+c(原始 = ncol(seu.obj), 过滤后 = ncol(seu.obj.filtered))
+
+
+## 5. B 细胞子集 ------------------------------------------------------
+# 看看 population 里有哪些值
+unique(seu.obj.filtered@meta.data$population)
+
+# 设定身份为 population
+Idents(seu.obj.filtered) <- "population"   # 等价于 Idents(seu.obj.filtered) <- seu.obj.filtered$population
+
+# 取出 B 细胞（假设 population 里 B 细胞标记为 "b"，区分大小写）
+b.seu <- subset(seu.obj.filtered, idents = "b")
+b.seu
+unique(b.seu@meta.data$redefined_cluster)
+
+
+## 6. Seurat 标准预处理 + 降维聚类 -----------------------------------
+b.seu <- NormalizeData(b.seu)
+b.seu <- FindVariableFeatures(b.seu)
+b.seu <- ScaleData(b.seu)
+b.seu <- RunPCA(b.seu)
+b.seu <- FindNeighbors(b.seu, dims = 1:30)
+b.seu <- FindClusters(b.seu, resolution = 0.9)
+b.seu <- RunUMAP(b.seu, dims = 1:30, n.neighbors = 50)
+
+a1 <- DimPlot(b.seu, reduction = "umap", group.by = "redefined_cluster", label = TRUE)
+a2 <- DimPlot(b.seu, reduction = "umap", group.by = "seurat_clusters",   label = TRUE)
+
+a1 | a2
+######就这样吧。。。接下来一步
+sessionInfo()
+install.packages(c("Matrix", "ggplot2", "Rcpp"))
+library(Seurat)
+library(monocle3)
+library(SeuratWrappers)
+exists("as.cell_data_set")
+
+
+library(monocle3)
+library(Seurat)
+library(dplyr)
+
+## 1. Seurat → CellDataSet -------------------------------------
+# 1. 去掉重复列名
+colData(cds) <- colData(cds)[, !duplicated(colnames(colData(cds)))]
+
+# 检查是否还存在重复（应该是 TRUE）
+length(unique(colnames(colData(cds)))) == ncol(colData(cds))
+# 2. 先学轨迹
+cds <- learn_graph(cds, use_partition = FALSE)
+
+# 3. 再画
+cluster.before.trajectory <- plot_cells(
+  cds,
+  color_cells_by = "cluster",
+  label_groups_by_cluster = TRUE,
+  label_leaves = FALSE,
+  label_branch_points = FALSE
+)
+
+cluster.names <- plot_cells(
+  cds,
+  color_cells_by = "redefined_cluster",
+  label_groups_by_cluster = FALSE,
+  label_leaves = FALSE,
+  label_branch_points = FALSE
+)
+
+cluster.before.trajectory | cluster.names
+######下一步#####################
+table(clusters(cds))
+# 1）先看 cluster 标记类型
+head(clusters(cds))
+
+# 2）选 cluster 5 的细胞做 root（注意这里用 "5"）
+root_cells <- names(clusters(cds))[clusters(cds) == "5"]
+length(root_cells)
+# 1. 按 cluster 5 的细胞做 root
+root_cells <- names(clusters(cds))[clusters(cds) == "5"]
+
+# 2. 进行伪时序排序
+cds <- order_cells(
+  cds,
+  reduction_method = "UMAP",
+  root_cells = root_cells
+)
+
+# 3. 绘制伪时序结果
+plot_cells(
+  cds,
+  color_cells_by = "pseudotime",
+  label_groups_by_cluster = FALSE,
+  label_branch_points = TRUE,
+  label_roots = TRUE,
+  label_leaves = FALSE,
+  group_label_size = 5
+)
+#######继续################
+library(ggplot2)
+library(dplyr)
+library(tibble)
+
+
+pseudotime(cds)
+cds$monocle3_pseudotime <- pseudotime(cds)
+data.pseudo <- as.data.frame(colData(cds))
+
+ggplot(data.pseudo, aes(
+  monocle3_pseudotime,
+  reorder(redefined_cluster, monocle3_pseudotime, median),
+  fill = redefined_cluster
+)) +
+  geom_boxplot()
+ggplot(data.pseudo, aes(
+  monocle3_pseudotime,
+  reorder(redefined_cluster, monocle3_pseudotime, median),
+  fill = redefined_cluster
+)) +
+  geom_boxplot(outlier.shape = NA) +
+  coord_cartesian(xlim = quantile(data.pseudo$monocle3_pseudotime, c(0.01, 0.99))) +
+  xlab("Monocle3 pseudotime") +
+  ylab("B cell subtypes")
+
+
+deg_bcells <- graph_test(cds, neighbor_graph = 'principal_graph', cores = 4)
+
+#####以上对的
+
+colnames(deg_bcells)
+deg_sig <- deg_bcells %>%
+  filter(status == "OK") %>%
+  filter(q_value < 1e-4, morans_I > 0.1) %>%  # 注意这里是 morans_I
+  arrange(q_value)
+
+head(deg_sig)
+nrow(deg_sig)
+
+
+####以上都对（可选择选）
+top6 <- c("STMN1", "E2F2", "CD52", "HMGN2", "LAPTM5", "CLSPN")
+plot_genes_in_pseudotime(cds[top6, ], color_cells_by = "redefined_cluster")
+
+FeaturePlot(b.seu, features = c("E2F2", "STMN1", "CD52"))
+b.seu$monocle3_pseudotime <- cds$monocle3_pseudotime[colnames(b.seu)]
+FeaturePlot(b.seu, features = "monocle3_pseudotime")
+
+############
+
+cluster.before.trajectory <- plot_cells(cds,
+                                        color_cells_by = 'cluster',
+                                        label_groups_by_cluster = FALSE,
+                                        group_label_size = 5) +
+  theme(legend.position = "right")
+
+cluster.names <- plot_cells(cds,
+                            color_cells_by = "redefined_cluster",
+                            label_groups_by_cluster = FALSE,
+                            group_label_size = 5) +
+  scale_color_manual(values = c('red', 'blue', 'green', 'maroon', 'yellow', 'grey', 'cyan')) +
+  theme(legend.position = "right")
+
+cluster.before.trajectory | cluster.names
+###或者
+cluster.before.trajectory <- plot_cells(
+  cds,
+  color_cells_by = "cluster",
+  label_groups_by_cluster = FALSE,
+  label_branch_points = FALSE,
+  label_roots = FALSE,
+  label_leaves = FALSE,
+  show_trajectory_graph = FALSE,   # 可选，更干净
+  group_label_size = 5
+) + theme(legend.position = "right")
+#####第二段learn_graph + 轨迹图：OK
+cds <- learn_graph(cds, use_partition = FALSE)
+
+plot_cells(cds,
+           color_cells_by = 'redefined_cluster',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE,
+           group_label_size = 5)
+######￥￥###
+# 选 cluster 5 的细胞作为根
+root_cells <- names(clusters(cds))[clusters(cds) == "5"]
+
+cds <- order_cells(
+  cds,
+  reduction_method = "UMAP",
+  root_cells = root_cells
+)
+
+plot_cells(
+  cds,
+  color_cells_by = "pseudotime",
+  label_groups_by_cluster = FALSE,
+  label_branch_points = FALSE,
+  label_roots = TRUE,   # 可以让根节点标出来
+  label_leaves = FALSE
+)
+#######4. 伪时序 boxplot：OK，只注意 ggplot2
+pseudotime(cds)
+cds$monocle3_pseudotime <- pseudotime(cds)
+data.pseudo <- as.data.frame(colData(cds))
+
+ggplot(data.pseudo, aes(monocle3_pseudotime,
+                        reorder(redefined_cluster, monocle3_pseudotime, median),
+                        fill = redefined_cluster)) +
+  geom_boxplot()
+
+#########5. graph_test + FeaturePlot：OK，筛选你已经完成
+deg_bcells <- graph_test(cds, neighbor_graph = 'principal_graph', cores = 4)
+
+deg_bcells %>% 
+  arrange(q_value) %>% 
+  filter(status == 'OK') %>% 
+  head()
+
+FeaturePlot(b.seu, features = c('E2F2', 'STMN1', 'CD52'))
+###如果要用筛选过的 deg_sig：
+deg_sig <- deg_bcells %>%
+  filter(status == "OK") %>%
+  filter(q_value < 1e-4, morans_I > 0.1) %>%  # 注意列名是 morans_I
+  arrange(q_value)
+####把 pseudotime 映射回 Seurat：建议对齐细胞名
+b.seu$pseudotime <- pseudotime(cds)
+Idents(b.seu) <- b.seu$redefined_cluster
+FeaturePlot(b.seu, features = "pseudotime", label = T)
+
+
+
+###稍微修改
+b.seu$pseudotime <- pseudotime(cds)[colnames(b.seu)]
+
+Idents(b.seu) <- "redefined_cluster"   # 这样写更清晰
+FeaturePlot(b.seu, features = "pseudotime", label = TRUE)
+
+
+
+###新的试试%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+## ------------------------------------------------------------
+##  Single-cell B cell trajectory analysis (适配你的 ABC 数据)
+## ------------------------------------------------------------
+
+## ===========================
+## 0. 环境 & 随机种子
+## ===========================
+set.seed(1234)
+
+library(Seurat)
+library(monocle3)
+library(SeuratWrappers)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+
+## ===========================
+## 1. 读入数据（用你自己的三行）
+## ===========================
+
+markers  <- read.delim("ABC_Marker.txt", header = TRUE, check.names = FALSE)   # gene metadata
+metadata <- read.delim("ABC_Meta.txt",   header = TRUE, check.names = FALSE)   # cell metadata
+expr     <- read.delim("ABC_umi_matrix_7551_cells.csv",
+                       header = TRUE,
+                       sep = ",",
+                       check.names = FALSE)                                    # expression matrix
+
+## 此时 expr 是一个 data.frame，行和列你之前已经用过，可以继续用
+## 不去改什么 rownames(expr) 了，直接转置 + 去重
+
+## ===========================
+## 2. 构建表达矩阵 & Seurat 对象
+## ===========================
+
+# 转置成：行 = 基因，列 = 细胞
+expr.t <- t(as.matrix(expr))
+
+# 关键一步：保证基因名唯一，避免 "Duplicate rownames not allowed"
+rownames(expr.t) <- make.unique(rownames(expr.t))
+
+# 创建 Seurat 对象
+seu.obj <- CreateSeuratObject(counts = expr.t)
+
+# 基本检查
+dim(seu.obj)
+head(rownames(seu.obj))   # 基因名
+head(colnames(seu.obj))   # 细胞名
+
+stopifnot(all(rownames(seu.obj@meta.data) == colnames(seu.obj)))
+
+## ===========================
+## 3. 安全添加 metadata（不再用 merge）
+## ===========================
+
+# 假设 ABC_Meta.txt 里有一列是 cell_id，和表达矩阵的列名对应
+# 如果列名不是 cell_id，请改成实际列名
+head(metadata)
+
+idx <- match(colnames(seu.obj), metadata$cell_id)
+metadata2 <- metadata[idx, ]
+
+# 必须完全一一对应
+stopifnot(all(metadata2$cell_id == colnames(seu.obj)))
+
+# 设定行为细胞，删除 cell_id 列本身
+rownames(metadata2) <- metadata2$cell_id
+metadata2$cell_id <- NULL
+
+# 安全加到 Seurat 对象中
+seu.obj <- AddMetaData(seu.obj, metadata2)
+
+# 再检查一次结构是否完好
+stopifnot(all(rownames(seu.obj@meta.data) == colnames(seu.obj)))
+
+
+## ===========================
+## 4. 线粒体比例（你的数据不会有 MT-，这里全 0 当占位）
+## ===========================
+
+seu.obj$mitopercent <- PercentageFeatureSet(seu.obj, pattern = "^MT-")
+summary(seu.obj$mitopercent)   # 这里全是 0 属于正常情况
+
+## ===========================
+## 5. 质控过滤（按你实际分布设置阈值）
+## ===========================
+
+# 你之前算的分位数显示：nCount_RNA、nFeature_RNA 都很高
+# 我们用一个相对合理的区间：
+# nCount_RNA   : 2000 ~ 200000
+# nFeature_RNA : 800  ~ 6000
+
+seu.obj.filtered <- subset(
+  seu.obj,
+  subset = nCount_RNA   > 2000   &
+    nCount_RNA   < 200000 &
+    nFeature_RNA > 800    &
+    nFeature_RNA < 6000
+)
+
+c(原始 = ncol(seu.obj), 过滤后 = ncol(seu.obj.filtered))
+
+
+## ===========================
+## 6. 提取 B 细胞子集
+## ===========================
+
+# 看看 population 这一列里有哪些细胞类型
+unique(seu.obj.filtered$population)
+
+# 设定细胞身份为 population
+Idents(seu.obj.filtered) <- "population"
+
+# 假设 B 细胞在 metadata$population 中标记为 "b"
+# 如果是 "B" 或 "B cell" 就改成相应字符串
+b.seu <- subset(seu.obj.filtered, idents = "b")
+b.seu
+unique(b.seu$redefined_cluster)
+
+
+## ===========================
+## 7. Seurat 标准预处理 + UMAP
+## ===========================
+
+b.seu <- NormalizeData(b.seu)
+b.seu <- FindVariableFeatures(b.seu)
+b.seu <- ScaleData(b.seu)
+b.seu <- RunPCA(b.seu)
+
+b.seu <- FindNeighbors(b.seu, dims = 1:30)
+b.seu <- FindClusters(b.seu, resolution = 0.9)
+
+set.seed(1234)
+b.seu <- RunUMAP(b.seu, dims = 1:30, n.neighbors = 50)
+
+a1 <- DimPlot(b.seu, reduction = "umap",
+              group.by = "redefined_cluster", label = TRUE)
+a2 <- DimPlot(b.seu, reduction = "umap",
+              group.by = "seurat_clusters",   label = TRUE)
+
+a1 | a2
+
+
+## ===========================
+## 8. Seurat → Monocle3
+## ===========================
+
+cds <- as.cell_data_set(b.seu)
+
+# 补 gene_short_name
+fData(cds)$gene_short_name <- rownames(fData(cds))
+
+# 用 Seurat 的 UMAP 作为 Monocle3 的 UMAP
+reducedDims(cds)$UMAP <- b.seu@reductions$umap@cell.embeddings
+
+# 基于 UMAP 聚类
+cds <- cluster_cells(cds, reduction_method = "UMAP")
+
+# 所有细胞放在同一个 partition
+partition <- rep("1", ncol(cds))
+names(partition) <- colnames(cds)
+cds@clusters$UMAP$partitions <- as.factor(partition)
+
+# 学习轨迹
+cds <- learn_graph(cds, use_partition = FALSE)
+
+
+## ===========================
+## 9. 选择 root（你这边用 cluster = 5）
+## ===========================
+
+table(clusters(cds))  # 确认 1–5 都存在
+
+root_cells <- names(clusters(cds))[clusters(cds) == "5"]
+
+cds <- order_cells(
+  cds,
+  reduction_method = "UMAP",
+  root_cells = root_cells
+)
+
+# 伪时序图
+plot_cells(
+  cds,
+  color_cells_by = "pseudotime",
+  label_groups_by_cluster = FALSE,
+  label_branch_points = TRUE,
+  label_roots = TRUE,
+  label_leaves = FALSE
+)
+
+
+## ===========================
+## 10. 伪时序写回 Seurat + 可视化
+## ===========================
+
+b.seu$pseudotime <- pseudotime(cds)[colnames(b.seu)]
+
+Idents(b.seu) <- "redefined_cluster"
+
+FeaturePlot(b.seu, features = "pseudotime", label = TRUE)
+
+
+## ===========================
+## 11. 沿伪时序变化的基因（graph_test）
+## ===========================
+
+deg_bcells <- graph_test(cds, neighbor_graph = "principal_graph", cores = 4)
+
+# 筛选显著且 Moran’s I 较高的基因
+deg_sig <- deg_bcells %>%
+  filter(status == "OK") %>%
+  filter(q_value < 1e-4, morans_I > 0.1) %>%   # 注意是 morans_I
+  arrange(q_value)
+
+head(deg_sig)
+nrow(deg_sig)
+
+# 举例画几个基因
+top_genes <- c("E2F2", "STMN1", "CD52")
+plot_genes_in_pseudotime(
+  cds[top_genes, ],
+  color_cells_by = "redefined_cluster"
+)
